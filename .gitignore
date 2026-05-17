@@ -1,0 +1,66 @@
+# ==========================================
+# 1. SIÊU NẶNG - CHẶN TOÀN BỘ CÁC CẤP THƯ MỤC (Nút thắt chí mạng)
+# ==========================================
+# Chặn sạch node_modules và venv ở BẤT KỲ CẤP THƯ MỤC CON NÀO (Dùng dấu **)
+**/node_modules/
+**/venv/
+**/.bun/
+node_modules/
+venv/
+
+# Chặn file khóa và cache của Bun/Node
+bun.lockb
+.npmrc
+
+# ==========================================
+# 2. CẤP THƯ MỤC TAURI / DESKTOP (RUST BUILD)
+# ==========================================
+# Thư mục target sinh ra khi build Rust cực kỳ nặng (vài GB)
+**/target/
+tauri/src-tauri/target/
+tauri/src-tauri/binaries/*
+tauri/src-tauri/gen/
+
+# ==========================================
+# 3. CẤP THƯ MỤC BACKEND / PYTHON CACHE
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+ENV/
+*.spec
+
+# ==========================================
+# 4. CHẶN DATA GENERATED & MEDIA (Video/Audio lớn)
+# ==========================================
+# Tránh việc lỡ add các file video/audio vài chục tiếng đang download dở
+data/
+!data/.gitkeep
+downloaded_data/
+tmp/
+temp/
+*.tmp
+*.mp4
+*.wav
+*.mp3
+
+# Các file test nặng của backend
+backend/tests/results/
+backend/tests/fixtures/reference_voice.wav
+
+# ==========================================
+# 5. BUILD OUTPUTS & IDE CONFIG
+# ==========================================
+dist/
+build/
+*.egg-info/
+*.egg
+*.exe
+*.msi
+.vscode/
+.idea/
+.env
+.env.local
