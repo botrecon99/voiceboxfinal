@@ -52,8 +52,11 @@ async def get_audio(generation_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Generation not found")
 
     audio_path = config.resolve_storage_path(generation.audio_path)
-    if audio_path is None or not audio_path.exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
+    
+    # 🔥 FIX CHÍNH TẠI ĐÂY: Thêm điều kiện `not audio_path.is_file()`
+    # Nếu file chưa tạo xong (mới chỉ là thư mục gốc), hoặc không tồn tại -> Trả về 404 luôn để chặn đứng lỗi 500.
+    if audio_path is None or not audio_path.exists() or not audio_path.is_file():
+        raise HTTPException(status_code=404, detail="Audio file is still generating or not found")
 
     return FileResponse(
         audio_path,

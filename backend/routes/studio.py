@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse
 import uuid
 import os
 import re
+import shutil
 
 # Import core từ thư mục backend
 from .. import core
@@ -16,6 +17,7 @@ DATA_DIR = r"D:\voicebox\opensource\voicebox\downloaded_data"
 
 tasks_db = {}
 
+# 1. CHỈNH SỬA: Thêm num_threads vào Pydantic Model để hứng dữ liệu từ React gửi lên
 class StudioRequest(BaseModel):
     url: str
     cookie: str
@@ -27,8 +29,7 @@ class StudioRequest(BaseModel):
     dub_vol: int
     create_sub: bool
     burn_sub: bool
-
-import shutil
+    num_threads: int = 3  # Mặc định là 3 luồng nếu không truyền xuống
 
 # --- HÀM HỖ TRỢ DỌN DẸP ---
 def cleanup_files(video_id: str):
@@ -38,13 +39,11 @@ def cleanup_files(video_id: str):
     if not os.path.exists(target_dir):
         return
 
-    # Danh sách các file cần giữ lại (thành phẩm)
     keep_extensions = ('.mp4', '.srt')
     
     try:
         files_deleted = 0
         for filename in os.listdir(target_dir):
-            # Nếu không phải file mp4 hoặc srt thì tiễn lên đường
             if not filename.lower().endswith(keep_extensions):
                 file_path = os.path.join(target_dir, filename)
                 if os.path.isfile(file_path):
@@ -68,7 +67,7 @@ def background_runner(task_id: str, req: StudioRequest):
     try:
         tasks_db[task_id]["status"] = "Đang khởi tạo tiến trình..."
         
-        # 1. Gọi Core xử lý render
+        # 2. CHỈNH SỬA: Bắn tiếp tham số req.num_threads vào hàm core.run_process
         result = core.run_process(
             url=req.url, 
             web_cookie=req.cookie,
@@ -81,16 +80,15 @@ def background_runner(task_id: str, req: StudioRequest):
             profile_id=req.profile_id,
             create_sub=req.create_sub, 
             burn_sub=req.burn_sub,
-            callback=update_progress
+            callback=update_progress,
+            num_threads=req.num_threads  # <--- Giao việc cho Core biết chạy bao nhiêu luồng
         )
 
-        # 2. Xử lý sau khi Render xong
+        # Xử lý sau khi Render xong
         if result.get("status") == "success":
             vid = result.get("video_id")
             
-            # --- THỰC HIỆN DỌN DẸP NGAY SAU KHI THÀNH CÔNG ---
             cleanup_files(vid)
-            # -----------------------------------------------
 
             tasks_db[task_id].update({
                 "percent": 100,
@@ -100,14 +98,12 @@ def background_runner(task_id: str, req: StudioRequest):
                 "sub_url": f"{BACKEND_URL}/api/files/{vid}/{vid}.srt" if (req.create_sub or req.burn_sub) else None
             })
         else:
-            # Nếu core báo lỗi
             tasks_db[task_id].update({
                 "percent": -1, 
                 "status": f"Lỗi: {result.get('msg')}"
             })
             
     except Exception as e:
-        # Nếu sập cả hệ thống
         tasks_db[task_id].update({
             "percent": -1, 
             "status": f"Lỗi hệ thống: {str(e)}"
@@ -143,7 +139,7 @@ async def start_process(req: StudioRequest, background_tasks: BackgroundTasks):
 async def get_progress(task_id: str):
     return tasks_db.get(task_id, {"percent": -1, "status": "Not found"})
 
-# --- API ÉP TẢI XUỐNG (FIX MỞ TAB MỚI) ---
+# --- API ÉP TẢI XUỐNG ---
 @router.get("/download-file/{vid}")
 async def download_file(vid: str, type: str = "mp4"):
     ext = "mp4" if type == "mp4" else "srt"
@@ -155,5 +151,5 @@ async def download_file(vid: str, type: str = "mp4"):
     return FileResponse(
         path=full_path,
         filename=f"PN_Media_{vid}.{ext}",
-        media_type='application/octet-stream' # Header ép tải xuống
+        media_type='application/octet-stream'
     )

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Video, Download, FileText, RotateCcw, Settings2, Sliders } from 'lucide-react';
+import { Video, Download, FileText, RotateCcw, Settings2, Sliders, Cpu } from 'lucide-react'; // Thêm icon Cpu cho trực quan
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -24,6 +24,10 @@ export default function StudioTab() {
   const [cookie, setCookie] = useState('');
   const [mixer, setMixer] = useState({ bg: 50, vocal: 10, dub: 200 });
   const [settings, setSettings] = useState({ createSub: true, burnSub: false });
+  
+  // 1. CHỈNH SỬA: Thêm state quản lý số luồng (Mặc định là 3 luồng)
+  const [numThreads, setNumThreads] = useState(5);
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
@@ -64,7 +68,10 @@ export default function StudioTab() {
         body: JSON.stringify({
           url, cookie, profile_id: selectedProfileId, model_id: selectedEngine,
           target_lang: selectedLanguage, bg_vol: mixer.bg, vocal_vol: mixer.vocal,
-          dub_vol: mixer.dub, create_sub: settings.createSub, burn_sub: settings.burnSub
+          dub_vol: mixer.dub, create_sub: settings.createSub, burn_sub: settings.burnSub,
+          
+          // 2. CHỈNH SỬA: Gửi kèm số luồng (num_threads) lên Backend API
+          num_threads: numThreads 
         })
       });
       const data = await resp.json();
@@ -103,6 +110,7 @@ export default function StudioTab() {
               <h2 className="text-sm font-semibold flex items-center gap-2 text-primary"><Settings2 className="w-4 h-4" /> Cấu hình</h2>
               <Input placeholder="Dán link YouTube..." value={url} onChange={(e) => setUrl(e.target.value)} className="rounded-2xl" />
               <textarea placeholder="Cookie..." className="w-full h-24 p-4 rounded-2xl bg-background/50 border border-accent/20 text-sm outline-none" value={cookie} onChange={(e) => setCookie(e.target.value)} />
+              
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex items-center justify-between p-3 border border-accent/20 rounded-xl">
                   <span className="text-xs">Tạo Sub</span>
@@ -113,6 +121,28 @@ export default function StudioTab() {
                   <Switch checked={settings.burnSub} onCheckedChange={v => setSettings({...settings, burnSub: v})} />
                 </div>
               </div>
+
+              {/* 3. CHỈNH SỬA: Thêm thanh trượt tùy chỉnh số luồng chạy song song */}
+              <div className="space-y-2 p-4 border border-accent/20 rounded-xl bg-accent/5">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <Cpu className="w-3.5 h-3.5 text-accent" /> Số luồng xử lý đồng thời
+                  </span>
+                  <span className="font-bold text-accent bg-accent/10 px-2 py-0.5 rounded-md">{numThreads} luồng</span>
+                </div>
+                <Slider 
+                  value={[numThreads]} 
+                  onValueChange={v => setNumThreads(v[0])} 
+                  min={1} 
+                  max={10} 
+                  step={1} 
+                  className="py-2"
+                />
+                <p className="text-[10px] text-muted-foreground italic">
+                  * Khuyến nghị: 3 - 5 luồng tùy vào sức mạnh card đồ họa của bạn.
+                </p>
+              </div>
+
               <Button className="w-full h-14 rounded-2xl font-bold" onClick={handleRun} disabled={isProcessing}>
                 {isProcessing ? 'Đang Render...' : '🚀 Bắt đầu Render'}
               </Button>
@@ -152,7 +182,22 @@ export default function StudioTab() {
           </div>
         </div>
       </div>
-      <FloatingGenerateBox showVoiceSelector isPlayerOpen={!!audioUrl} />
+    {/* 1. Tìm chỗ gọi FloatingGenerateBox cũ và thay bằng cụm này */}
+<div id="force-center-box">
+  <FloatingGenerateBox showVoiceSelector isPlayerOpen={!!audioUrl} />
+</div>
+
+{/* 2. Thêm đoạn mã CSS này vào ngay phía trên lệnh return (hoặc bất kỳ đâu trong file) */}
+<style>{`
+  #force-center-box > div {
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: 100% !important;
+    max-width: 1024px !important; /* khớp với max-w-5xl (1024px) */
+    padding-left: 1.5rem !important;
+    padding-right: 1.5rem !important;
+  }
+`}</style>
     </div>
   );
 }

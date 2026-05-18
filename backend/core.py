@@ -229,8 +229,8 @@ def wait_for_audio_ready(generation_id, output_file, base_url):
     start_time = time.time()
     # Thời gian đợi tối đa 1 phút mỗi file
     while True:
-        if time.time() - start_time > 60:
-            print(" ❌ Quá thời gian chờ (1 phút)!", flush=True)
+        if time.time() - start_time > 10000:
+            print(" ❌ Quá thời gian chờ (10000s)!", flush=True)
             return False
 
         try:
@@ -254,21 +254,24 @@ def wait_for_audio_ready(generation_id, output_file, base_url):
             print(f"\n⚠️ Lỗi mạng khi polling: {e}", flush=True)
             time.sleep(2)
 
-def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id, profile_id, callback):
+# Thêm num_threads=3 ở cuối cùng (mặc định là 3 nếu UI không truyền gì qua)
+def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id, profile_id, callback, num_threads=3):
     total = len(subs)
-    
-    for i, item in enumerate(subs):
+    completed_count = 0
+    counter_lock = threading.Lock()
+
+    def process_single_item(item):
+        nonlocal completed_count
         idx = item['index'] + 1
         output_file = os.path.join(output_folder, f"audio_{idx:05d}.wav")
         
-        # Bỏ qua nếu file đã tồn tại và đủ dung lượng
         if os.path.exists(output_file) and os.path.getsize(output_file) > 1024:
-            continue
+            with counter_lock:
+                completed_count += 1
+                if callback:
+                    callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
+            return
 
-        if callback:
-            callback(20 + int((i / total) * 30), f"Đang gen AI: {idx}/{total}")
-
-        # BƯỚC 1: RA LỆNH GEN
         api_url = f"{BASE_URL}/generate"
         payload = {
             "text": item['text'],
@@ -282,17 +285,30 @@ def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id,
             if resp.status_code == 200:
                 task_data = resp.json()
                 generation_id = task_data.get("id")
-                
                 if generation_id:
-                    # BƯỚC 2: POLLING TRỰC TIẾP
                     success = wait_for_audio_ready(generation_id, output_file, BASE_URL)
-                    if not success:
-                        print(f"⚠️ Câu {idx} không tải được audio.")
+                    if not success: print(f"\n⚠️ Câu {idx} gặp lỗi khi tải audio.")
             else:
-                print(f"❌ Server báo lỗi câu {idx}: {resp.status_code}")
+                print(f"\n❌ Server báo lỗi câu {idx}: {resp.status_code}")
         except Exception as e:
-            print(f"❌ Lỗi kết nối gen câu {idx}: {e}")
+            print(f"\n❌ Lỗi kết nối khi gen câu {idx}: {e}")
+        finally:
+            with counter_lock:
+                completed_count += 1
+                if callback:
+                    callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
 
+    # 🚀 Ép kiểu về số nguyên đề phòng UI truyền nhầm dạng chữ (string)
+    try:
+        max_workers = int(num_threads)
+    except:
+        max_workers = 3
+
+    log_info(f"🔥 Đang kích hoạt {max_workers} luồng xử lý song song để gen giọng AI...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor.map(process_single_item, subs)
+
+    log_success("✅ Đã hoàn thành gen AI cho toàn bộ các câu!")
     return True
 
 # ==============================================================================
@@ -464,7 +480,8 @@ def smart_mix_video_moviepy(output_folder, bg_vol_pct, vocal_vol_pct, dubbing_vo
             try: clip.close()
             except: pass
 
-def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_id, profile_id, create_sub, burn_sub, callback):
+# 1. Đảm bảo dòng này có nhận num_threads=3 ở cuối cùng
+def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_id, profile_id, create_sub, burn_sub, callback, num_threads=3):
     try:
         web_cookie = web_cookie.strip().replace('\n','').replace('\r','') if web_cookie else ""
         model_id = model_id.strip() if model_id else "kokoro"
@@ -500,7 +517,9 @@ def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_
             generate_srt_file(translated, os.path.join(folder, f"{vid}.srt"))
         
         callback(20, "Đang khởi động RTX 3060 tạo Giọng Lồng Tiếng...")
-        generate_local_dubbing(vid, translated, folder, target, model_id, profile_id, callback)
+        
+        # 2. Đảm bảo dòng này truyền tiếp num_threads xuống dưới
+        generate_local_dubbing(vid, translated, folder, target, model_id, profile_id, callback, num_threads=num_threads)
         
         callback(50, "Đang tải video gốc...")
         download_video(vid, folder)

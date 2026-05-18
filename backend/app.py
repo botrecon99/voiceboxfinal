@@ -97,22 +97,19 @@ def create_app() -> FastAPI:
     application.add_middleware(ClientIdMiddleware)
     register_routers(application)
 
-    # --- KHU VỰC MOUNT VIDEO DATA (ĐÃ SỬA LỖI ĐƯỜNG DẪN) ---
+    # --- KHU VỰC MOUNT VIDEO DATA (ĐÃ FIX LỖI 404) ---
     from fastapi.staticfiles import StaticFiles
     
-    # Path(__file__).resolve().parent.parent đưa ta về: D:\voicebox\opensource\voicebox
+    # Tự động lấy đường dẫn tuyệt đối của thư mục gốc dự án
     base_dir = Path(__file__).resolve().parent.parent
-    
-    # Nối thẳng vào downloaded_data (Bỏ bớt 1 chữ voicebox thừa)
     data_dir = base_dir / "downloaded_data"
     
-    # Kiểm tra nếu thư mục tồn tại thì mới mount để tránh sập server
-    if data_dir.is_dir():
-        application.mount("/api/files", StaticFiles(directory=str(data_dir)), name="video-files")
-        logger.info("Video Data: mounted at /api/files -> %s", data_dir)
-    else:
-        logger.error("Video Data Error: Directory NOT FOUND at %s", data_dir)
-    # ------------------------------------------------------
+    # Ép hệ thống tự tạo thư mục downloaded_data ngay lập tức nếu chưa có
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Cổng luôn mở, không sợ dính bẫy conditional bỏ mount nữa
+    application.mount("/api/files", StaticFiles(directory=str(data_dir)), name="video-files")
+    logger.info("Video Data: mounted at /api/files -> %s", data_dir)
 
     application.mount("/mcp", mcp_app)
     logger.info("MCP: mounted at /mcp")
