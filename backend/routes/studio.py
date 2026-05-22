@@ -67,7 +67,6 @@ def background_runner(task_id: str, req: StudioRequest):
     try:
         tasks_db[task_id]["status"] = "Đang khởi tạo tiến trình..."
         
-        # 2. CHỈNH SỬA: Bắn tiếp tham số req.num_threads vào hàm core.run_process
         result = core.run_process(
             url=req.url, 
             web_cookie=req.cookie,
@@ -81,13 +80,12 @@ def background_runner(task_id: str, req: StudioRequest):
             create_sub=req.create_sub, 
             burn_sub=req.burn_sub,
             callback=update_progress,
-            num_threads=req.num_threads  # <--- Giao việc cho Core biết chạy bao nhiêu luồng
+            num_threads=req.num_threads
         )
 
-        # Xử lý sau khi Render xong
+        # Xử lý sau khi Render xong hoặc Bị Dừng
         if result.get("status") == "success":
             vid = result.get("video_id")
-            
             cleanup_files(vid)
 
             tasks_db[task_id].update({
@@ -97,6 +95,14 @@ def background_runner(task_id: str, req: StudioRequest):
                 "video_url": f"{BACKEND_URL}/api/files/{vid}/{vid}.mp4",
                 "sub_url": f"{BACKEND_URL}/api/files/{vid}/{vid}.srt" if (req.create_sub or req.burn_sub) else None
             })
+            
+        elif result.get("status") == "canceled":
+            # 💡 Thêm bắt trạng thái "Hủy" từ core.py bắn lên
+            tasks_db[task_id].update({
+                "percent": -2,  # Dùng -2 để React phân biệt với -1 (Lỗi)
+                "status": "🛑 Tiến trình đã bị hủy!"
+            })
+            
         else:
             tasks_db[task_id].update({
                 "percent": -1, 
@@ -138,6 +144,21 @@ async def start_process(req: StudioRequest, background_tasks: BackgroundTasks):
 @router.get("/progress/{task_id}")
 async def get_progress(task_id: str):
     return tasks_db.get(task_id, {"percent": -1, "status": "Not found"})
+
+# =========================================================================
+# 🔴 API MỚI: DỪNG TIẾN TRÌNH KHẨN CẤP
+# =========================================================================
+@router.post("/cancel/{task_id}")
+async def cancel_process(task_id: str):
+    if task_id in tasks_db:
+        # Bật công tắc ngắt điện trong core.py
+        core.cancel_event.set()
+        
+        # Báo tạm về UI (ngay sau đó vòng lặp trong core văng lỗi sẽ set lại thành -2)
+        tasks_db[task_id]["status"] = "Đang ngắt tiến trình..."
+        return {"status": "success", "msg": "Đã gửi lệnh dừng!"}
+        
+    raise HTTPException(status_code=404, detail="Task không tồn tại hoặc đã kết thúc")
 
 # --- API ÉP TẢI XUỐNG ---
 @router.get("/download-file/{vid}")

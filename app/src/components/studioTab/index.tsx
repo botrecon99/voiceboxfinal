@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Video, Download, FileText, RotateCcw, Settings2, Sliders, Cpu } from 'lucide-react'; // Thêm icon Cpu cho trực quan
+import { Video, Download, FileText, RotateCcw, Settings2, Sliders, Cpu, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -24,14 +24,13 @@ export default function StudioTab() {
   const [cookie, setCookie] = useState('');
   const [mixer, setMixer] = useState({ bg: 50, vocal: 10, dub: 200 });
   const [settings, setSettings] = useState({ createSub: true, burnSub: false });
-  
-  // 1. CHỈNH SỬA: Thêm state quản lý số luồng (Mặc định là 3 luồng)
   const [numThreads, setNumThreads] = useState(5);
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
   const [result, setResult] = useState<{ videoId?: string; videoUrl?: string; subUrl?: string } | null>(null);
+  const [taskId, setTaskId] = useState(''); // State lưu mã task để dừng
 
   // --- TỰ ĐỘNG CHECK KHI DÁN LINK ---
   useEffect(() => {
@@ -51,7 +50,6 @@ export default function StudioTab() {
     return () => clearTimeout(t);
   }, [url]);
 
-  // --- HÀM TẢI FILE (GỌI THẲNG API DOWNLOAD) ---
   const handleDownload = (vid: string, type: 'mp4' | 'srt') => {
     window.location.href = `${API_BASE}/download-file/${vid}?type=${type}`;
   };
@@ -69,30 +67,51 @@ export default function StudioTab() {
           url, cookie, profile_id: selectedProfileId, model_id: selectedEngine,
           target_lang: selectedLanguage, bg_vol: mixer.bg, vocal_vol: mixer.vocal,
           dub_vol: mixer.dub, create_sub: settings.createSub, burn_sub: settings.burnSub,
-          
-          // 2. CHỈNH SỬA: Gửi kèm số luồng (num_threads) lên Backend API
           num_threads: numThreads 
         })
       });
       const data = await resp.json();
-      if (resp.ok) trackProgress(data.task_id);
+      if (resp.ok) {
+        setTaskId(data.task_id);
+        trackProgress(data.task_id);
+      } else {
+        setIsProcessing(false);
+      }
     } catch (e) { setIsProcessing(false); }
+  };
+
+  const handleCancel = async () => {
+    if (!taskId) return;
+    try {
+      await fetch(`${API_BASE}/cancel/${taskId}`, { method: 'POST' });
+      toast({ title: "Đang hủy...", description: "Hệ thống sẽ dừng ngay lập tức." });
+    } catch (e) { console.error(e); }
   };
 
   const trackProgress = (tid: string) => {
     const itv = setInterval(async () => {
-      const r = await fetch(`${API_BASE}/progress/${tid}`);
-      const s = await r.json();
-      setProgress(s.percent);
-      setStatus(s.status);
-      if (s.percent === 100) {
-        clearInterval(itv);
-        setIsProcessing(false);
-        setResult({ videoId: s.video_id, videoUrl: s.video_url, subUrl: s.sub_url });
-      } else if (s.percent === -1) {
-        clearInterval(itv);
-        setIsProcessing(false);
-      }
+      try {
+        const r = await fetch(`${API_BASE}/progress/${tid}`);
+        const s = await r.json();
+        
+        if (s.percent === -2) { // Trạng thái Hủy thành công
+          clearInterval(itv);
+          setIsProcessing(false);
+          setStatus("🛑 Đã hủy thành công!");
+          toast({ title: "Đã hủy", description: "Tiến trình render đã dừng." });
+        } else if (s.percent === 100) {
+          clearInterval(itv);
+          setIsProcessing(false);
+          setResult({ videoId: s.video_id, videoUrl: s.video_url, subUrl: s.sub_url });
+        } else if (s.percent === -1) {
+          clearInterval(itv);
+          setIsProcessing(false);
+          setStatus("❌ Lỗi Render!");
+        } else {
+          setProgress(s.percent);
+          setStatus(s.status);
+        }
+      } catch (e) { clearInterval(itv); setIsProcessing(false); }
     }, 1000);
   };
 
@@ -122,30 +141,27 @@ export default function StudioTab() {
                 </div>
               </div>
 
-              {/* 3. CHỈNH SỬA: Thêm thanh trượt tùy chỉnh số luồng chạy song song */}
               <div className="space-y-2 p-4 border border-accent/20 rounded-xl bg-accent/5">
                 <div className="flex justify-between items-center text-xs">
                   <span className="flex items-center gap-1.5 font-medium">
-                    <Cpu className="w-3.5 h-3.5 text-accent" /> Số luồng xử lý đồng thời
+                    <Cpu className="w-3.5 h-3.5 text-accent" /> Số luồng xử lý
                   </span>
                   <span className="font-bold text-accent bg-accent/10 px-2 py-0.5 rounded-md">{numThreads} luồng</span>
                 </div>
-                <Slider 
-                  value={[numThreads]} 
-                  onValueChange={v => setNumThreads(v[0])} 
-                  min={1} 
-                  max={10} 
-                  step={1} 
-                  className="py-2"
-                />
-                <p className="text-[10px] text-muted-foreground italic">
-                  * Khuyến nghị: 3 - 5 luồng tùy vào sức mạnh card đồ họa của bạn.
-                </p>
+                <Slider value={[numThreads]} onValueChange={v => setNumThreads(v[0])} min={1} max={10} step={1} className="py-2" />
               </div>
 
-              <Button className="w-full h-14 rounded-2xl font-bold" onClick={handleRun} disabled={isProcessing}>
-                {isProcessing ? 'Đang Render...' : '🚀 Bắt đầu Render'}
-              </Button>
+              {/* Nút Render/Hủy */}
+              {isProcessing ? (
+                <Button variant="destructive" className="w-full h-14 rounded-2xl font-bold gap-2" onClick={handleCancel}>
+                  <StopCircle className="w-5 h-5" /> Dừng Render ngay
+                </Button>
+              ) : (
+                <Button className="w-full h-14 rounded-2xl font-bold" onClick={handleRun}>
+                  🚀 Bắt đầu Render
+                </Button>
+              )}
+
               <AnimatePresence>
                 {isProcessing && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-2 p-4 border border-accent/20 rounded-xl bg-accent/5">
@@ -182,22 +198,21 @@ export default function StudioTab() {
           </div>
         </div>
       </div>
-    {/* 1. Tìm chỗ gọi FloatingGenerateBox cũ và thay bằng cụm này */}
-<div id="force-center-box">
-  <FloatingGenerateBox showVoiceSelector isPlayerOpen={!!audioUrl} />
-</div>
+      
+      <div id="force-center-box">
+        <FloatingGenerateBox showVoiceSelector isPlayerOpen={!!audioUrl} />
+      </div>
 
-{/* 2. Thêm đoạn mã CSS này vào ngay phía trên lệnh return (hoặc bất kỳ đâu trong file) */}
-<style>{`
-  #force-center-box > div {
-    left: 50% !important;
-    transform: translateX(-50%) !important;
-    width: 100% !important;
-    max-width: 1024px !important; /* khớp với max-w-5xl (1024px) */
-    padding-left: 1.5rem !important;
-    padding-right: 1.5rem !important;
-  }
-`}</style>
+      <style>{`
+        #force-center-box > div {
+          left: 50% !important;
+          transform: translateX(-50%) !important;
+          width: 100% !important;
+          max-width: 1024px !important;
+          padding-left: 1.5rem !important;
+          padding-right: 1.5rem !important;
+        }
+      `}</style>
     </div>
   );
 }

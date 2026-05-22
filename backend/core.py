@@ -21,12 +21,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip, vfx
 from proglog import ProgressBarLogger
 import time
+import wave
 
 # ==============================================================================
-# [CẤU HÌNH HỆ THỐNG]
+# [CẤU HÌNH HỆ THỐNG & ĐIỀU KHIỂN KHẨN CẤP]
 # ==============================================================================
 API_PORT = 17493  # Cổng Backend đang chạy
 BASE_URL = f"http://127.0.0.1:{API_PORT}"
+
+# Cờ tín hiệu để điều khiển việc DỪNG tiến trình khẩn cấp
+cancel_event = threading.Event()
+
+# Lỗi tùy chỉnh để bẻ gãy các vòng lặp khi bấm Dừng
+class ProcessCanceledException(Exception):
+    pass
 
 # ==============================================================================
 # [LOGGING UTILS]
@@ -71,6 +79,10 @@ class MyBarLogger(ProgressBarLogger):
         self.progress_func = progress_func
 
     def bars_callback(self, bar, attr, value, old_value=None):
+        # BẪY DỪNG KHẨN CẤP MOVIEPY
+        if cancel_event.is_set():
+            raise ProcessCanceledException("🛑 Tiến trình Render Video đã bị hủy bởi người dùng!")
+            
         if bar == 't' and self.progress_func:
             try:
                 total = self.bars[bar]['total']
@@ -126,10 +138,6 @@ def generate_srt_file(subtitles, output_path):
         for i, sub in enumerate(subtitles):
             f.write(f"{i+1}\n{format_timestamp(sub['start'])} --> {format_timestamp(sub['end'])}\n{sub['text']}\n\n")
 
-def time_stretch_audio(input_path, output_path, speed_factor):
-    if speed_factor > 2.0: speed_factor = 2.0
-    subprocess.run([FFMPEG_LOCAL_PATH, '-y', '-i', input_path, '-filter:a', f"atempo={speed_factor}", '-vn', output_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return output_path if os.path.exists(output_path) else input_path
 
 class YouTubeProExtractor:
     def __init__(self, headers):
@@ -143,6 +151,7 @@ class YouTubeProExtractor:
             except: pass
 
     def get_subtitle_data(self, video_id, output_folder, lang_code='en'):
+        if cancel_event.is_set(): raise ProcessCanceledException("🛑 Đã hủy!")
         log_step(f"Đang trích xuất phụ đề gốc cho ID: {video_id}")
         try:
             ydl_opts = {
@@ -208,6 +217,7 @@ class YouTubeProExtractor:
             return []
 
 def translate_and_map(video_id, subtitles_list, headers, src_lang, target_lang):
+    if cancel_event.is_set(): raise ProcessCanceledException("🛑 Đã hủy!")
     url = "https://yd.transduck.com/api/v2/translateAll"
     try:
         response = requests.post(url, params={'language': src_lang, 'to': target_lang, 'videoId': video_id, 'platform': 'pc'}, headers=headers, json=[item['text'] for item in subtitles_list], timeout=60)
@@ -219,48 +229,40 @@ def translate_and_map(video_id, subtitles_list, headers, src_lang, target_lang):
     except Exception as e: raise Exception(str(e))
 
 def wait_for_audio_ready(generation_id, output_file, base_url):
-    """
-    Hàm Polling: Đợi server xử lý xong và tải file wav xuống đĩa.
-    """
-    # Thay đổi sang endpoint lấy audio trực tiếp
     download_url = f"{base_url}/audio/{generation_id}"
     print(f"\n⏳ [POLLING] Đang đợi tải ID: {generation_id}", end="", flush=True)
     
     start_time = time.time()
-    # Thời gian đợi tối đa 1 phút mỗi file
     while True:
+        if cancel_event.is_set(): return False
+        
         if time.time() - start_time > 10000:
             print(" ❌ Quá thời gian chờ (10000s)!", flush=True)
             return False
 
         try:
-            # Dùng stream=True để chỉ tải file nếu status_code = 200
             resp = requests.get(download_url, stream=True, timeout=10)
-            
             if resp.status_code == 200:
                 content_type = resp.headers.get("Content-Type", "").lower()
-                
-                # Xác nhận là file audio hoặc RIFF header
                 if "audio" in content_type or resp.content.startswith(b'RIFF'):
                     with open(output_file, 'wb') as f:
                         f.write(resp.content)
                     print(f" ✅ Tải xong! ({os.path.getsize(output_file)} bytes)", flush=True)
                     return True
-            
             print(".", end="", flush=True)
             time.sleep(2) 
-            
         except Exception as e:
             print(f"\n⚠️ Lỗi mạng khi polling: {e}", flush=True)
             time.sleep(2)
 
-# Thêm num_threads=3 ở cuối cùng (mặc định là 3 nếu UI không truyền gì qua)
 def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id, profile_id, callback, num_threads=3):
     total = len(subs)
     completed_count = 0
     counter_lock = threading.Lock()
 
     def process_single_item(item):
+        if cancel_event.is_set(): return # BẪY DỪNG KHẨN CẤP
+        
         nonlocal completed_count
         idx = item['index'] + 1
         output_file = os.path.join(output_folder, f"audio_{idx:05d}.wav")
@@ -268,8 +270,7 @@ def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id,
         if os.path.exists(output_file) and os.path.getsize(output_file) > 1024:
             with counter_lock:
                 completed_count += 1
-                if callback:
-                    callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
+                if callback: callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
             return
 
         api_url = f"{BASE_URL}/generate"
@@ -295,26 +296,23 @@ def generate_local_dubbing(video_id, subs, output_folder, target_lang, model_id,
         finally:
             with counter_lock:
                 completed_count += 1
-                if callback:
-                    callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
+                if callback: callback(20 + int((completed_count / total) * 30), f"Đang gen AI: {completed_count}/{total}")
 
-    # 🚀 Ép kiểu về số nguyên đề phòng UI truyền nhầm dạng chữ (string)
-    try:
-        max_workers = int(num_threads)
-    except:
-        max_workers = 3
+    try: max_workers = int(num_threads)
+    except: max_workers = 3
 
     log_info(f"🔥 Đang kích hoạt {max_workers} luồng xử lý song song để gen giọng AI...")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         executor.map(process_single_item, subs)
 
+    if cancel_event.is_set(): raise ProcessCanceledException("🛑 Tiến trình gen AI đã bị hủy!")
     log_success("✅ Đã hoàn thành gen AI cho toàn bộ các câu!")
     return True
 
-# ==============================================================================
-# [TẢI VIDEO GỐC BẰNG BAT FILE]
-# ==============================================================================
+
 def download_video(video_id, output_folder):
+    if cancel_event.is_set(): raise ProcessCanceledException("🛑 Đã hủy!")
+    
     for f in os.listdir(output_folder):
         if f.startswith("source_video") and f.endswith(('.mp4','.webm','.mkv')):
             file_path = os.path.join(output_folder, f)
@@ -328,7 +326,6 @@ def download_video(video_id, output_folder):
     log_info(f"Đang gọi taiok.bat để tải video ID: {video_id}...")
     bat_file_path = os.path.abspath(os.path.join(CURRENT_DIR, "taiok.bat"))
     
-    # Kiểm tra xem bat có nằm ở thư mục cha không
     if not os.path.exists(bat_file_path):
         bat_file_path = os.path.abspath(os.path.join(CURRENT_DIR, "..", "taiok.bat"))
         if not os.path.exists(bat_file_path):
@@ -359,9 +356,6 @@ def download_video(video_id, output_folder):
     except Exception as e: raise Exception(f"Lỗi tải video (taiok.bat): {str(e)}")
 
 
-# ==============================================================================
-# [TÁCH NHẠC VÀ MIX AUDIO MP4]
-# ==============================================================================
 def separate_audio_demucs(video_path, output_folder):
     log_info("🎵 Đang bóc tách nhạc nền bằng Demucs...")
     temp_audio = os.path.join(output_folder, "temp_full_audio.mp3")
@@ -373,115 +367,141 @@ def separate_audio_demucs(video_path, output_folder):
     demucs_out_dir = os.path.join(output_folder, "htdemucs", "temp_full_audio")
     return os.path.join(demucs_out_dir, "vocals.wav"), os.path.join(demucs_out_dir, "no_vocals.wav")
 
-def smart_mix_video_moviepy(output_folder, bg_vol_pct, vocal_vol_pct, dubbing_vol_pct, video_id, burn_sub=False, progress_callback=None):
-    if progress_callback: 
-        progress_callback(55, "Đang xử lý Smart Mix Âm thanh...")
-    
-    video_path = next((os.path.join(output_folder, f) for f in os.listdir(output_folder) if f.startswith("source_video")), None)
-    
-    if not video_path: 
-        raise Exception(f"Không tìm thấy video gốc (source_video) trong thư mục: {output_folder}")
-
-    video_clip = None
-    final_audio = None
-    final_video = None
-    bg_audio_clip = None
-    vocal_audio_clip = None
-    base_audio_clips = []
-    dubbing_clips = []
+def prepare_audio_segment(input_path, output_path, speed_factor):
+    if speed_factor > 1.4: speed_factor = 1.4
+    if speed_factor < 0.7: speed_factor = 0.7 
     
     try:
-        video_clip = VideoFileClip(video_path)
-        
-        try:
-            vocals_path, no_vocals_path = separate_audio_demucs(video_path, output_folder)
-            bg_audio_clip = AudioFileClip(no_vocals_path).volumex(bg_vol_pct / 100.0)
-            vocal_audio_clip = AudioFileClip(vocals_path).volumex(vocal_vol_pct / 100.0)
-            base_audio_clips = [bg_audio_clip, vocal_audio_clip]
-        except Exception as e:
-            log_warn(f"Demucs lỗi hoặc không khả dụng ({str(e)}), quay về dùng âm thanh gốc.")
-            base_audio_clips = [video_clip.audio.volumex(bg_vol_pct / 100.0)]
-
-        sub_json_path = os.path.join(output_folder, "final_subtitles.json")
-        if not os.path.exists(sub_json_path):
-            raise Exception("Thiếu file final_subtitles.json để thực hiện lồng tiếng.")
-
-        with open(sub_json_path, 'r', encoding='utf-8') as f:
-            subs = json.load(f)
-
-        SYNC_OFFSET = 0.2
-        for i, item in enumerate(subs):
-            idx = item['index'] + 1
-            
-            # Ưu tiên stretch audio
-            audio_file = os.path.join(output_folder, f"audio_{idx:05d}_stretched.wav")
-            
-            if not os.path.exists(audio_file):
-                audio_file = os.path.join(output_folder, f"audio_{idx:05d}.wav")
-            
-            if os.path.exists(audio_file):
-                try:
-                    actual_start = float(item['start']) + SYNC_OFFSET
-                    # Stretch audio time 
-                    max_duration = (float(subs[i+1]['start']) - float(item['start'])) if i < len(subs)-1 else (video_clip.duration - actual_start)
-                    
-                    temp_clip = AudioFileClip(audio_file)
-                    if temp_clip.duration > max_duration and max_duration > 0.5:
-                         speed = min(temp_clip.duration / max_duration, 1.4)
-                         audio_file = time_stretch_audio(audio_file, os.path.join(output_folder, f"audio_{idx:05d}_stretched.wav"), speed)
-                    temp_clip.close()
-
-                    dub_clip = (AudioFileClip(audio_file).set_start(actual_start).volumex(dubbing_vol_pct / 100.0))
-                    dubbing_clips.append(dub_clip)
-                except Exception as e:
-                    pass
-
-        if progress_callback: 
-            progress_callback(70, "Bắt đầu Render Video MP4...")
-
-        final_audio = CompositeAudioClip(base_audio_clips + dubbing_clips).set_duration(video_clip.duration)
-        final_video = video_clip.set_audio(final_audio)
-        final_output = os.path.join(output_folder, f"{video_id}.mp4")
-        
-        ffmpeg_params = ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-pix_fmt", "yuv420p"]
-        
-        if burn_sub:
-            srt_path = os.path.join(output_folder, f"{video_id}.srt")
-            if os.path.exists(srt_path):
-                safe_srt_path = srt_path.replace('\\', '/').replace(':', '\\:')
-                ffmpeg_params.extend(["-vf", f"subtitles='{safe_srt_path}'"])
-
-        final_video.write_videofile(
-            final_output, 
-            codec="h264_nvenc", 
-            audio_codec="aac", 
-            temp_audiofile=os.path.join(output_folder, 'temp-audio.m4a'), 
-            remove_temp=False, 
-            ffmpeg_params=ffmpeg_params, 
-            bitrate="30000k", 
-            threads=4, 
-            logger=MyBarLogger(progress_callback)
-        )
-        
-        return final_output
-
+        subprocess.run([
+            FFMPEG_LOCAL_PATH, '-y', '-i', input_path, 
+            '-filter:a', f"atempo={speed_factor}", 
+            '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', '-vn', output_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+            return output_path
     except Exception as e:
-        log_error("Lỗi trong hàm smart_mix_video_moviepy:", e)
-        raise e
-        
-    finally:
-        log_info("🧹 Dọn dẹp bộ nhớ MoviePy...")
-        if final_video: final_video.close()
-        if final_audio: final_audio.close()
-        if video_clip: video_clip.close()
-        if bg_audio_clip: bg_audio_clip.close()
-        if vocal_audio_clip: vocal_audio_clip.close()
-        for clip in dubbing_clips:
-            try: clip.close()
-            except: pass
+        pass
+    return None
 
-# 1. Đảm bảo dòng này có nhận num_threads=3 ở cuối cùng
+def smart_mix_video_moviepy(output_folder, bg_vol_pct, vocal_vol_pct, dubbing_vol_pct, video_id, burn_sub=False, progress_callback=None):
+    if progress_callback: progress_callback(55, "Đang xử lý Smart Mix Âm thanh...")
+    if cancel_event.is_set(): raise ProcessCanceledException("🛑 Đã hủy!")
+    
+    video_path = next((os.path.join(output_folder, f) for f in os.listdir(output_folder) if f.startswith("source_video")), None)
+    if not video_path: raise Exception("Không tìm thấy video gốc.")
+
+    video_clip = VideoFileClip(video_path)
+    base_audio_clips = []
+    
+    try:
+        vocals_path, no_vocals_path = separate_audio_demucs(video_path, output_folder)
+        base_audio_clips.append(AudioFileClip(no_vocals_path).volumex(bg_vol_pct / 100.0))
+        base_audio_clips.append(AudioFileClip(vocals_path).volumex(vocal_vol_pct / 100.0))
+    except:
+        base_audio_clips = [video_clip.audio.volumex(bg_vol_pct / 100.0)]
+
+    with open(os.path.join(output_folder, "final_subtitles.json"), 'r', encoding='utf-8') as f:
+        subs = json.load(f)
+
+    if progress_callback: progress_callback(60, "Đang lắp ráp track lồng tiếng tổng...")
+    master_dub_path = os.path.join(output_folder, "master_dubbing_track.wav")
+    
+    SAMPLE_RATE = 44100
+    CHANNELS = 2
+    SAMPWIDTH = 2
+    BYTES_PER_SEC = SAMPLE_RATE * CHANNELS * SAMPWIDTH
+    
+    out_wav = wave.open(master_dub_path, 'wb')
+    out_wav.setnchannels(CHANNELS)
+    out_wav.setsampwidth(SAMPWIDTH)
+    out_wav.setframerate(SAMPLE_RATE)
+    
+    current_bytes_written = 0
+    SYNC_OFFSET = 0.8
+    
+    for i, item in enumerate(subs):
+        if cancel_event.is_set(): raise ProcessCanceledException("🛑 Tiến trình Mix âm thanh đã bị hủy!")
+        
+        idx = item['index'] + 1
+        
+        audio_file = os.path.join(output_folder, f"audio_{idx:05d}.wav")
+        if not os.path.exists(audio_file):
+            audio_file = os.path.join(output_folder, f"audio_{idx:05d}.mp3")
+            
+        if os.path.exists(audio_file) and os.path.getsize(audio_file) > 100:
+            actual_start = float(item['start']) + SYNC_OFFSET
+            target_duration = float(item['end']) - float(item['start'])
+            if target_duration < 0.5: target_duration = 0.5
+            
+            try:
+                temp_audio = AudioFileClip(audio_file)
+                current_duration = temp_audio.duration
+                temp_audio.close()
+            except: continue
+                
+            ratio = current_duration / target_duration
+            speed_factor = max(0.7, min(1.4, ratio))
+            
+            ready_path = os.path.join(output_folder, f"ready_{idx:05d}.wav")
+            prepared_file = prepare_audio_segment(audio_file, ready_path, speed_factor)
+            
+            if prepared_file:
+                target_start_bytes = int(actual_start * BYTES_PER_SEC)
+                target_start_bytes -= target_start_bytes % 4 
+                
+                if target_start_bytes > current_bytes_written:
+                    silence_length = target_start_bytes - current_bytes_written
+                    out_wav.writeframes(b'\x00' * silence_length)
+                    current_bytes_written = target_start_bytes
+                    
+                try:
+                    with wave.open(prepared_file, 'rb') as in_wav:
+                        frames = in_wav.readframes(in_wav.getnframes())
+                        max_allowed_bytes = int(target_duration * BYTES_PER_SEC)
+                        max_allowed_bytes -= max_allowed_bytes % 4
+                        
+                        if len(frames) > max_allowed_bytes:
+                            frames = frames[:max_allowed_bytes]
+                            
+                        out_wav.writeframes(frames)
+                        current_bytes_written += len(frames)
+                except:
+                    pass
+                    
+    out_wav.close()
+    
+    if os.path.exists(master_dub_path) and os.path.getsize(master_dub_path) > 100:
+        final_dub_clip = AudioFileClip(master_dub_path).volumex(dubbing_vol_pct / 100.0)
+        base_audio_clips.append(final_dub_clip)
+
+    if progress_callback: progress_callback(70, "Bắt đầu Render Video MP4...")
+
+    final_audio = CompositeAudioClip(base_audio_clips).set_duration(video_clip.duration)
+    final_video = video_clip.set_audio(final_audio)
+    final_output = os.path.join(output_folder, f"{video_id}.mp4")
+    
+    ffmpeg_params = ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-pix_fmt", "yuv420p"]
+    if burn_sub and os.path.exists(os.path.join(output_folder, f"{video_id}.srt")):
+        srt_path_escaped = os.path.join(output_folder, f"{video_id}.srt").replace('\\', '/').replace(':', '\\:')
+        ffmpeg_params.extend(["-vf", f"subtitles='{srt_path_escaped}':force_style='Fontname=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,Alignment=2,MarginV=25'"])
+
+    final_video.write_videofile(
+        final_output, codec="h264_nvenc", audio_codec="aac", 
+        temp_audiofile=os.path.join(output_folder, 'temp-audio.m4a'), remove_temp=True, 
+        ffmpeg_params=ffmpeg_params if burn_sub else ["-preset", "p7", "-tune", "hq", "-pix_fmt", "yuv420p"], 
+        bitrate="30000k", threads=4, logger=MyBarLogger(progress_callback)
+    )
+    
+    return final_output
+
+
+# ==============================================================================
+# [HÀM CHẠY CHÍNH (MAIN ENTRY POINT)]
+# ==============================================================================
 def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_id, profile_id, create_sub, burn_sub, callback, num_threads=3):
+    # LÀM SẠCH CỜ DỪNG TRƯỚC KHI BẮT ĐẦU CHUYẾN MỚI
+    cancel_event.clear() 
+    
     try:
         web_cookie = web_cookie.strip().replace('\n','').replace('\r','') if web_cookie else ""
         model_id = model_id.strip() if model_id else "kokoro"
@@ -517,8 +537,6 @@ def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_
             generate_srt_file(translated, os.path.join(folder, f"{vid}.srt"))
         
         callback(20, "Đang khởi động RTX 3060 tạo Giọng Lồng Tiếng...")
-        
-        # 2. Đảm bảo dòng này truyền tiếp num_threads xuống dưới
         generate_local_dubbing(vid, translated, folder, target, model_id, profile_id, callback, num_threads=num_threads)
         
         callback(50, "Đang tải video gốc...")
@@ -528,6 +546,12 @@ def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_
         
         callback(100, "Hoàn tất Render!")
         return {"status": "success", "file": path, "video_id": vid}
+        
+    except ProcessCanceledException as e:
+        log_warn(str(e))
+        callback(0, "🛑 Đã hủy tiến trình!")
+        return {"status": "canceled", "msg": str(e)}
+        
     except Exception as e: 
         log_error("LỖI QUY TRÌNH CHÍNH:", e)
         return {"status": "error", "msg": str(e)}
