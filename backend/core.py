@@ -219,14 +219,45 @@ class YouTubeProExtractor:
 def translate_and_map(video_id, subtitles_list, headers, src_lang, target_lang):
     if cancel_event.is_set(): raise ProcessCanceledException("🛑 Đã hủy!")
     url = "https://yd.transduck.com/api/v2/translateAll"
+    
+    # 1. Chuẩn bị payload
+    payload = [item['text'] for item in subtitles_list]
+    
+    # 2. Gọi API với log chi tiết
     try:
-        response = requests.post(url, params={'language': src_lang, 'to': target_lang, 'videoId': video_id, 'platform': 'pc'}, headers=headers, json=[item['text'] for item in subtitles_list], timeout=60)
-        if response.status_code != 200: raise Exception("Lỗi API Dịch Transduck")
-        translations = response.json().get("translations", [])
+        response = requests.post(
+            url, 
+            params={'language': src_lang, 'to': target_lang, 'videoId': video_id, 'platform': 'pc'}, 
+            headers=headers, 
+            json=payload, 
+            timeout=60
+        )
+        
+        # LOG PHẢN HỒI THỰC TẾ ĐỂ XEM NÓ CÓ DỊCH KHÔNG
+        log_info(f"🔍 [DEBUG] Response Text: {response.text[:200]}") 
+
+        if response.status_code != 200:
+            raise Exception(f"API Transduck báo lỗi: {response.status_code} - {response.text}")
+            
+        data = response.json()
+        translations = data.get("translations", [])
+        
+        if not translations:
+            log_error("⚠️ API trả về danh sách dịch rỗng!")
+            return subtitles_list
+
+        # Cập nhật văn bản
         for i, item in enumerate(subtitles_list):
-            if i < len(translations): item['text'] = (translations[i].get("text", "") if isinstance(translations[i], dict) else str(translations[i])).strip()
+            if i < len(translations):
+                # Lưu ý: Transduck có thể trả về dict hoặc string
+                new_val = translations[i]
+                item['text'] = (new_val.get("text", "") if isinstance(new_val, dict) else str(new_val)).strip()
+        
         return subtitles_list
-    except Exception as e: raise Exception(str(e))
+
+    except Exception as e:
+        log_error("❌ Lỗi nghiêm trọng tại translate_and_map:", str(e))
+        raise Exception(f"Không thể dịch được: {str(e)}")
 
 def wait_for_audio_ready(generation_id, output_file, base_url):
     download_url = f"{base_url}/audio/{generation_id}"
@@ -502,6 +533,9 @@ def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_
     # LÀM SẠCH CỜ DỪNG TRƯỚC KHI BẮT ĐẦU CHUYẾN MỚI
     cancel_event.clear() 
     
+    # --- LOG THÔNG TIN NHẬN TỪ PAYLOAD ---
+    log_info(f"📥 [PAYLOAD RECEIVED] Source Lang: {src}, Target Lang: {target}, Model ID: {model_id}")
+    
     try:
         web_cookie = web_cookie.strip().replace('\n','').replace('\r','') if web_cookie else ""
         model_id = model_id.strip() if model_id else "kokoro"
@@ -522,12 +556,14 @@ def run_process(url, web_cookie, bg_vol, vocal_vol, dub_vol, src, target, model_
         subs = yt.get_subtitle_data(vid, folder, src)
         if not subs: raise Exception("Không tìm thấy phụ đề cho video này.")
         
-        callback(10, "Đang dịch bằng Transduck...")
+        callback(10, f"Đang dịch từ {src} sang {target} bằng Transduck...")
         transduck_headers = {
             'User-Agent': 'Mozilla/5.0', 
             'Cookie': web_cookie, 
             'Content-Type': 'application/json'
         }
+        
+        # Gọi hàm dịch
         translated = translate_and_map(vid, subs, transduck_headers, src, target)
         
         with open(os.path.join(folder, "final_subtitles.json"), "w", encoding="utf-8") as f:
